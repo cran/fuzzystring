@@ -1,8 +1,8 @@
-#' Fuzzy join backend using 'data.table' + 'C++' row binding
+#' Fuzzy join backend using 'data.table' plus compiled 'C++' assembly
 #'
-#' Low-level engine used by \code{\link{fuzzystring_join}} and the 'C++'-optimized
+#' Low-level engine used by \code{\link{fuzzystring_join}} and the compiled
 #' fuzzy join helpers. It builds the match index with R 'data.table' and then
-#' assembles the result using a compiled 'C++' binder for speed.
+#' expands and assembles the result using compiled 'C++' binding code for speed.
 #'
 #' @param match_fun A function used to match values. It must return a logical
 #'   vector (or a data.frame/data.table whose first column is logical) indicating
@@ -25,15 +25,17 @@
 #'   \code{"semi"}, or \code{"anti"}.
 #' @param ... Additional arguments passed to the matching function(s).
 #'
-#' @return A joined table (same container type as \code{x}). See
-#'   \code{\link{fuzzystring_join}}.
+#' @return A joined table that preserves the container class of \code{x}:
+#'   \code{data.table} inputs return \code{data.table}, tibble inputs return
+#'   tibble, and plain \code{data.frame} inputs return plain
+#'   \code{data.frame}. See \code{\link{fuzzystring_join}}.
 #'
 #' @details
 #' This function works like \code{\link{fuzzystring_join}}, but replaces the
-#' R-based row binding with a 'C++' implementation. This provides better performance,
-#' especially for large joins with many matches. It is intended as a backend and
-#' does not compute distances itself; use \code{\link{fuzzystring_join}} for
-#' string-distance based matching.
+#' R-based output assembly with a compiled 'C++' implementation. This provides
+#' better performance, especially for large joins, outer joins, and wide tables.
+#' It is intended as a backend and does not compute distances itself; use
+#' \code{\link{fuzzystring_join}} for string-distance based matching.
 #'
 #' The C++ implementation handles:
 #' \itemize{
@@ -61,9 +63,25 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
   }
 
   x_is_dt <- data.table::is.data.table(x)
+  x_is_tibble <- inherits(x, "tbl_df")
 
-  x_original <- x
-  y_original <- y
+  restore_output_class <- function(out) {
+    if (x_is_dt) {
+      return(out)
+    }
+
+    if (x_is_tibble) {
+      if (!requireNamespace("tibble", quietly = TRUE)) {
+        stop(
+          "Returning tibble output requires the 'tibble' package to be installed.",
+          call. = FALSE
+        )
+      }
+      return(tibble::as_tibble(out, .name_repair = "minimal"))
+    }
+
+    as.data.frame(out)
+  }
 
   if (data.table::is.data.table(x)) {
     x_dt <- x
@@ -88,18 +106,39 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
   }
 
   group_indices_1col <- function(dt, col) {
+    # Group rows by values in a single column and return row indices for each group.
+    # Used to identify which rows in x/y have the same value before matching.
+    # Returns: data.table with columns (col_name, indices) where indices is a list of row numbers
     dt[, .(indices = list(.I)), by = c(col), verbose = FALSE]
   }
 
   group_indices_multicol <- function(dt, cols) {
+    # Group rows by values in multiple columns and return row indices for each combination.
+    # Used for multi-column fuzzy matching (e.g., match on both "first_name" and "last_name").
+    # Returns: data.table with columns (cols..., indices) where indices is a list of row numbers
     dt[, .(indices = list(.I)), by = cols, verbose = FALSE]
   }
 
   expand_index_lists <- function(x_lists, y_lists) {
+    # Compute Cartesian product of index groups for matched values.
+    #
+    # When two values match (e.g., "Alice" from x matches "Alice" from y),
+    # all row pairs must be combined: if x has rows [1,3] and y has rows [2,5],
+    # the output includes pairs (1,2), (1,5), (3,2), (3,5).
+    #
+    # Args:
+    #   x_lists: list of integer vectors, each containing row indices for one value
+    #   y_lists: corresponding list for y table (same length as x_lists)
+    #
+    # Returns: list with components:
+    #   x: all row indices from x, repeated appropriately
+    #   y: all row indices from y, repeated appropriately
+    #   x_len, y_len: original group sizes (for validation/bookkeeping)
+
     x_len <- lengths(x_lists)
     y_len <- lengths(y_lists)
 
-    rep_counts <- x_len * y_len
+    rep_counts <- x_len * y_len  # Cartesian product size per group
     total_size <- sum(rep_counts)
 
     if (total_size == 0L) {
@@ -116,7 +155,9 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
       if (lx > 0L && ly > 0L) {
         n <- lx * ly
         end_pos <- pos + n - 1L
+        # Repeat each x index ly times (expanding rows for all y in this group)
         x_rep[pos:end_pos] <- rep.int(x_lists[[i]], times = ly)
+        # Repeat y indices each lx times (pairing each y with all x in this group)
         y_rep[pos:end_pos] <- rep(y_lists[[i]], each = lx)
         pos <- end_pos + 1L
       }
@@ -126,6 +167,16 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
   }
 
   replicate_extras <- function(extra_dt, w, x_len, y_len) {
+    # Replicate extra columns (e.g., distance values) to match Cartesian product expansion.
+    # When matching produces n Cartesian product rows from one group, the extra column value
+    # (which is computed once per group) must be replicated n times.
+    #
+    # Args:
+    #   extra_dt: data.table with extra columns (e.g., distance values), one row per match
+    #   w: indices of matched groups (1-based, to index into extra_dt)
+    #   x_len, y_len: group sizes used to compute rep_counts = x_len * y_len
+    #
+    # Returns: expanded extra_dt with rows replicated according to Cartesian product sizes
     if (is.null(extra_dt)) return(NULL)
     rep_counts <- x_len * y_len
     if (sum(rep_counts) == 0L) return(extra_dt[0])
@@ -136,121 +187,11 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
   # --- C++ binding function --------------------------------------------------
   # Uses the compiled C++ function instead of R implementation
 
-  bind_by_rowid_cpp_wrapper <- function(x_dt2, y_dt2, matches_dt, x_orig = x_dt2, y_orig = y_dt2, overlap = character(0)) {
-    n_rows <- nrow(matches_dt)
-
-    if (n_rows == 0L) {
-      # Empty case
-      ret <- data.table::data.table()
-      for (col in names(x_dt2)) ret[[col]] <- x_dt2[[col]][0]
-      for (col in names(y_dt2)) ret[[col]] <- y_dt2[[col]][0]
-      extra_cols <- setdiff(names(matches_dt), c("x", "y", "i"))
-      for (col in extra_cols) ret[[col]] <- matches_dt[[col]]
-      return(ret)
+  bind_by_rowid_cpp_wrapper <- function(x_dt2, y_dt2, matches_dt, overlap = character(0)) {
+    ret <- bind_by_rowid_cpp_matches(x_dt2, y_dt2, matches_dt, overlap)
+    if (!data.table::is.data.table(ret)) {
+      ret <- data.table::as.data.table(ret)
     }
-
-    x_idx <- matches_dt$x
-    y_idx <- matches_dt$y
-    has_na <- any(is.na(x_idx)) || any(is.na(y_idx))
-
-    # For inner joins (no NAs), use C++ function directly
-    if (!has_na) {
-      # Use original data for subsetting
-      use_x <- if (identical(x_dt2, x_orig)) x_orig else x_dt2
-      use_y <- if (identical(y_dt2, y_orig)) y_orig else y_dt2
-
-      # Ensure they are data.tables
-      if (!data.table::is.data.table(use_x)) use_x <- data.table::as.data.table(use_x)
-      if (!data.table::is.data.table(use_y)) use_y <- data.table::as.data.table(use_y)
-
-      # Call C++ function (via Rcpp)
-      ret <- bind_by_rowid_cpp(use_x, use_y, x_idx, y_idx, overlap)
-
-      # Convert to data.table if not already
-      if (!data.table::is.data.table(ret)) {
-        ret <- data.table::as.data.table(ret)
-      }
-
-      # Add extra columns if exist
-      extra_cols <- setdiff(names(matches_dt), c("x", "y", "i"))
-      if (length(extra_cols) > 0L) {
-        data.table::setalloccol(ret)
-        for (col in extra_cols) {
-          data.table::set(ret, j = col, value = matches_dt[[col]])
-        }
-      }
-
-      return(ret)
-    }
-
-    # For outer joins with NAs, still use R implementation for now
-    # (Could be optimized in C++ later if needed)
-    ret <- data.table::data.table(.dummy = seq_len(n_rows))
-
-    for (col in names(x_orig)) {
-      col_data <- x_orig[[col]]
-      if (is.factor(col_data)) {
-        new_col <- factor(rep(NA, n_rows), levels = levels(col_data))
-      } else if (inherits(col_data, "Date")) {
-        new_col <- rep(as.Date(NA), n_rows)
-      } else if (inherits(col_data, "POSIXct")) {
-        new_col <- rep(as.POSIXct(NA), n_rows)
-      } else if (is.integer(col_data)) {
-        new_col <- rep(NA_integer_, n_rows)
-      } else if (is.numeric(col_data)) {
-        new_col <- rep(NA_real_, n_rows)
-      } else if (is.character(col_data)) {
-        new_col <- rep(NA_character_, n_rows)
-      } else if (is.logical(col_data)) {
-        new_col <- rep(NA, n_rows)
-      } else {
-        new_col <- rep(col_data[NA_integer_], n_rows)
-      }
-
-      valid_x <- !is.na(x_idx)
-      if (any(valid_x)) {
-        new_col[valid_x] <- col_data[x_idx[valid_x]]
-      }
-      ret[[col]] <- new_col
-    }
-
-    for (col in names(y_orig)) {
-      col_data <- y_orig[[col]]
-      if (is.factor(col_data)) {
-        new_col <- factor(rep(NA, n_rows), levels = levels(col_data))
-      } else if (inherits(col_data, "Date")) {
-        new_col <- rep(as.Date(NA), n_rows)
-      } else if (inherits(col_data, "POSIXct")) {
-        new_col <- rep(as.POSIXct(NA), n_rows)
-      } else if (is.integer(col_data)) {
-        new_col <- rep(NA_integer_, n_rows)
-      } else if (is.numeric(col_data)) {
-        new_col <- rep(NA_real_, n_rows)
-      } else if (is.character(col_data)) {
-        new_col <- rep(NA_character_, n_rows)
-      } else if (is.logical(col_data)) {
-        new_col <- rep(NA, n_rows)
-      } else {
-        new_col <- rep(col_data[NA_integer_], n_rows)
-      }
-
-      valid_y <- !is.na(y_idx)
-      if (any(valid_y)) {
-        new_col[valid_y] <- col_data[y_idx[valid_y]]
-      }
-      ret[[col]] <- new_col
-    }
-
-    ret[, .dummy := NULL]
-
-    extra_cols <- setdiff(names(matches_dt), c("x", "y", "i"))
-    if (length(extra_cols) > 0L) {
-      data.table::setalloccol(ret)
-      for (col in extra_cols) {
-        data.table::set(ret, j = col, value = matches_dt[[col]])
-      }
-    }
-
     ret
   }
 
@@ -363,8 +304,8 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
     ix <- group_indices_multicol(x_dt, by2$x)
     iy <- group_indices_multicol(y_dt, by2$y)
 
-    ux <- as.matrix(ix[, ..by2$x])
-    uy <- as.matrix(iy[, ..by2$y])
+    ux <- as.matrix(ix[, by2$x, with = FALSE])
+    uy <- as.matrix(iy[, by2$y, with = FALSE])
 
     n_x <- nrow(ux)
     n_y <- nrow(uy)
@@ -407,8 +348,8 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
     imf <- as_mapper_dt(index_match_fun)
     by2 <- fst_common_by(multi_by, x_dt, y_dt)
 
-    d1 <- x_dt[, ..by2$x]
-    d2 <- y_dt[, ..by2$y]
+    d1 <- x_dt[, by2$x, with = FALSE]
+    d2 <- y_dt[, by2$y, with = FALSE]
     matches <- imf(d1, d2)
 
     if (!data.table::is.data.table(matches)) matches <- data.table::as.data.table(matches)
@@ -426,20 +367,17 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
     keep <- sort(unique(matches$x))
     keep <- keep[!is.na(keep)]
     res <- x_dt[keep]
-    return(res)
-    #return(if (data.table::is.data.table(x)) res else as.data.frame(res))
+    return(restore_output_class(res))
   }
 
   if (mode == "anti") {
     if (nrow(matches) == 0L) {
-      return(x_dt)
-      #return(if (data.table::is.data.table(x)) x_dt else as.data.frame(x_dt))
+      return(restore_output_class(x_dt))
     }
     drop <- sort(unique(matches$x))
     drop <- drop[!is.na(drop)]
     res <- x_dt[-drop]
-    return(res)
-    #return(if (data.table::is.data.table(x)) res else as.data.frame(res))
+    return(restore_output_class(res))
   }
 
   # --- preparar renombres y completar índices según modo ---------------------
@@ -482,75 +420,9 @@ fuzzystring_join_backend <- function(x, y, by = NULL, match_fun = NULL,
 
   # --- construir resultado final usando C++ ---------------------------------
 
-  ret <- bind_by_rowid_cpp_wrapper(x_dt, y_dt, matches, x_original, y_original, overlap)
+  ret <- bind_by_rowid_cpp_wrapper(x_dt, y_dt, matches, overlap)
   ret <- fst_ensure_distance_col(ret, distance_col = NULL, mode = mode)
 
-  ret
+  restore_output_class(ret)
 }
-# Wrappers ------------------------------------------------------------
-
-#' Fuzzy inner join
-#'
-#' Convenience wrapper for \code{fuzzystring_join_backend(mode = "inner")}.
-#'
-#' @inheritParams fuzzystring_join_backend
-#' @return See \code{\link{fuzzystring_join_backend}}.
-#' @export
-fstring_inner_join <- function(x, y, by = NULL, match_fun, ...) {
-  fuzzystring_join_backend(x, y, by = by, match_fun = match_fun, mode = "inner", ...)
-}
-
-#' Fuzzy left join
-#'
-#' Convenience wrapper for \code{fuzzystring_join_backend(mode = "left")}.
-#'
-#' @inheritParams fuzzystring_join_backend
-#' @return See \code{\link{fuzzystring_join_backend}}.
-#' @export
-fstring_left_join <- function(x, y, by = NULL, match_fun, ...) {
-  fuzzystring_join_backend(x, y, by = by, match_fun = match_fun, mode = "left", ...)
-}
-
-#' Fuzzy right join
-#'
-#' Convenience wrapper for \code{fuzzystring_join_backend(mode = "right")}.
-#'
-#' @inheritParams fuzzystring_join_backend
-#' @return See \code{\link{fuzzystring_join_backend}}.
-#' @export
-fstring_right_join <- function(x, y, by = NULL, match_fun, ...) {
-  fuzzystring_join_backend(x, y, by = by, match_fun = match_fun, mode = "right", ...)
-}
-
-#' Fuzzy full join
-#'
-#' Convenience wrapper for \code{fuzzystring_join_backend(mode = "full")}.
-#'
-#' @inheritParams fuzzystring_join_backend
-#' @return See \code{\link{fuzzystring_join_backend}}.
-#' @export
-fstring_full_join <- function(x, y, by = NULL, match_fun, ...) {
-  fuzzystring_join_backend(x, y, by = by, match_fun = match_fun, mode = "full", ...)
-}
-
-#' Fuzzy semi join
-#'
-#' Convenience wrapper for \code{fuzzystring_join_backend(mode = "semi")}.
-#'
-#' @inheritParams fuzzystring_join_backend
-#' @return See \code{\link{fuzzystring_join_backend}}.
-#' @export
-fstring_semi_join <- function(x, y, by = NULL, match_fun, ...) {
-  fuzzystring_join_backend(x, y, by = by, match_fun = match_fun, mode = "semi", ...)
-}
-
-#' Fuzzy anti join
-#'
-#' Convenience wrapper for \code{fuzzystring_join_backend(mode = "anti")}.
-#'
-#' @inheritParams fuzzystring_join_backend
-#' @return See \code{\link{fuzzystring_join_backend}}.
-#' @export
-fstring_anti_join <- function(x, y, by = NULL, match_fun, ...) {
-  fuzzystring_join_backend(x, y, by = by, match_fun = match_fun, mode = "anti", ...)
-}
+#

@@ -1,416 +1,170 @@
-
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# fuzzystring <a href="https://paulesantos.github.io/fuzzystring/"><img src="man/figures/fuzzystring.png" align="right" height="250" /></a>
+# fuzzystring <a href="https://paulesantos.github.io/fuzzystring/"><img src="man/figures/fuzzystring.png" align="right" width="200" style="max-width: 200px; height: auto;" /></a>
 
 <!-- badges: start -->
 
-[![CRAN
-status](https://www.r-pkg.org/badges/version/fuzzystring)](https://CRAN.R-project.org/package=fuzzystring)
+[![CRAN status](https://www.r-pkg.org/badges/version/fuzzystring)](https://CRAN.R-project.org/package=fuzzystring)
 [![R-CMD-check](https://github.com/PaulESantos/fuzzystring/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/PaulESantos/fuzzystring/actions/workflows/R-CMD-check.yaml)
-[![Lifecycle:
-stable](https://img.shields.io/badge/lifecycle-stable-blue.svg)](https://lifecycle.r-lib.org/articles/stages.html)
+[![Lifecycle: stable](https://img.shields.io/badge/lifecycle-stable-blue.svg)](https://lifecycle.r-lib.org/articles/stages.html)
 [![](http://cranlogs.r-pkg.org/badges/grand-total/fuzzystring?color=blue)](https://cran.r-project.org/package=fuzzystring)
 [![](http://cranlogs.r-pkg.org/badges/last-week/fuzzystring?color=blue)](https://cran.r-project.org/package=fuzzystring)
 <!-- badges: end -->
 
-**fuzzystring** provides fast, flexible fuzzy string joins for data
-frames using approximate string matching. Built on top of `data.table`
-and `stringdist`, it’s designed for efficiently merging datasets where
-exact matches aren’t possible due to misspellings, inconsistent
-formatting, or slight variations in text.
+**fuzzystring** provides fast, flexible fuzzy string joins for `data.frame` and
+`data.table` objects using approximate string matching. It combines
+`stringdist`-based matching with a `data.table` backend and compiled C++ result
+assembly to reduce overhead in large joins while preserving standard join
+semantics.
 
 ## Why fuzzystring?
 
-Real-world data is messy. You might need to:
+Real-world identifiers rarely line up exactly. `fuzzystring` is designed for
+workloads such as:
 
-- Match company names that are spelled slightly differently across
-  datasets
-- Join customer records with typos or abbreviations
-- Reconcile product catalogs with inconsistent naming
-- Link survey responses to predefined categories despite spelling errors
-- Merge datasets where identifiers have been transcribed with errors
+- matching customer or company names with typos
+- reconciling product catalogs with inconsistent labels
+- linking survey responses to a controlled vocabulary
+- joining reference tables to messy user input
 
-**fuzzystring** makes these tasks straightforward with:
+The package includes:
 
-- **All standard join types**: inner, left, right, full, semi, and anti
-  joins
-- **Multiple distance metrics**: Levenshtein, Damerau-Levenshtein,
-  Jaro-Winkler, Soundex, and more
-- **High performance**: C++ row binding and `data.table` backend for
-  speed
-- **Optional distance column**: Track how close matches are
-- **Flexible matching**: Case-insensitive options and customizable
-  distance thresholds
+- fuzzy `inner`, `left`, `right`, `full`, `semi`, and `anti` joins
+- multiple `stringdist` methods, including OSA, Levenshtein,
+  Damerau-Levenshtein, Jaro-Winkler, q-gram, cosine, jaccard, and soundex
+- output that preserves the class of `x` (`data.table`, tibble, or base
+  `data.frame`)
+- optional distance columns for matched pairs
+- case-insensitive matching
+- adaptive candidate planning for single-column joins
+- compiled C++ row expansion and result assembly across join modes
 
 ## Installation
 
 ``` r
-# Development version from GitHub
-# Using pak (recommended)
-pak::pak("PaulESantos/fuzzystring")
+# Install from CRAN
+install.packages("fuzzystring")
 
-# Or using remotes
-remotes::install_github("PaulESantos/fuzzystring")
+# Development version from GitHub
+# pak::pak("PaulESantos/fuzzystring")
+# remotes::install_github("PaulESantos/fuzzystring")
 ```
 
 ## Quick start
 
-Here’s a simple example matching diamond cuts with slight misspellings:
-
 ``` r
 library(fuzzystring)
 
-# Your messy data
 x <- data.frame(
-  name = c("Idea", "Premiom", "Very Good"), 
+  name = c("Idea", "Premiom", "Very Good"),
   id = 1:3
 )
 
-# Reference data
 y <- data.frame(
-  approx_name = c("Ideal", "Premium", "VeryGood"), 
+  approx_name = c("Ideal", "Premium", "VeryGood"),
   grp = c("A", "B", "C")
 )
 
-# Fuzzy join with max distance of 2 edits
 fuzzystring_inner_join(
   x, y,
   by = c(name = "approx_name"),
   max_dist = 2,
   distance_col = "distance"
 )
-#>      name id approx_name grp distance
-#> 1:   Idea  1       Ideal   A        1
-#> 2: Premiom  2     Premium   B        2
 ```
 
-## Key features
-
-### All join types supported
+## Join families
 
 ``` r
-# Inner join - only matching rows
 fuzzystring_inner_join(x, y, by = c(name = "approx_name"), max_dist = 2)
-
-# Left join - all rows from x, matching rows from y
 fuzzystring_left_join(x, y, by = c(name = "approx_name"), max_dist = 2)
-
-# Right join - all rows from y, matching rows from x
 fuzzystring_right_join(x, y, by = c(name = "approx_name"), max_dist = 2)
-
-# Full join - all rows from both tables
 fuzzystring_full_join(x, y, by = c(name = "approx_name"), max_dist = 2)
-
-# Semi join - rows from x that have a match in y
 fuzzystring_semi_join(x, y, by = c(name = "approx_name"), max_dist = 2)
-
-# Anti join - rows from x that don't have a match in y
 fuzzystring_anti_join(x, y, by = c(name = "approx_name"), max_dist = 2)
 ```
 
-### Multiple distance methods
+## Distance methods
 
 ``` r
-# Optimal String Alignment (default)
 fuzzystring_inner_join(x, y, by = c(name = "approx_name"), method = "osa")
-
-# Damerau-Levenshtein
 fuzzystring_inner_join(x, y, by = c(name = "approx_name"), method = "dl")
-
-# Jaro-Winkler (good for names)
 fuzzystring_inner_join(x, y, by = c(name = "approx_name"), method = "jw")
-
-# Soundex (phonetic matching)
 fuzzystring_inner_join(x, y, by = c(name = "approx_name"), method = "soundex")
 ```
 
-### Case-insensitive matching
+## Case-insensitive matching
 
 ``` r
 fuzzystring_inner_join(
-  x, y, 
+  x, y,
   by = c(name = "approx_name"),
   ignore_case = TRUE,
   max_dist = 1
 )
 ```
 
-## Extended example: Correcting misspellings
+## Included example data
 
-A common use case is matching misspelled words against a dictionary. The
-package includes a dataset of 4,500+ common misspellings from Wikipedia.
+The package ships with `misspellings`, a dataset of common misspellings adapted
+from Wikipedia for examples and testing.
 
 ``` r
-library(tidyverse)
-#> ── Attaching core tidyverse packages ──────────────────────── tidyverse 2.0.0 ──
-#> ✔ dplyr     1.1.4     ✔ readr     2.1.6
-#> ✔ forcats   1.0.1     ✔ stringr   1.6.0
-#> ✔ ggplot2   4.0.1     ✔ tibble    3.3.1
-#> ✔ lubridate 1.9.4     ✔ tidyr     1.3.2
-#> ✔ purrr     1.2.1     
-#> ── Conflicts ────────────────────────────────────────── tidyverse_conflicts() ──
-#> ✖ dplyr::filter() masks stats::filter()
-#> ✖ dplyr::lag()    masks stats::lag()
-#> ℹ Use the conflicted package (<http://conflicted.r-lib.org/>) to force all conflicts to become errors
-library(fuzzystring)
-
-# Load misspellings dataset
 data(misspellings)
-misspellings
-#> # A tibble: 4,505 × 2
-#>    misspelling correct   
-#>    <chr>       <chr>     
-#>  1 abandonned  abandoned 
-#>  2 aberation   aberration
-#>  3 abilties    abilities 
-#>  4 abilty      ability   
-#>  5 abondon     abandon   
-#>  6 abbout      about     
-#>  7 abotu       about     
-#>  8 abouta      about a   
-#>  9 aboutit     about it  
-#> 10 aboutthe    about the 
-#> # ℹ 4,495 more rows
-```
-
-Let’s match these against a real dictionary:
-
-``` r
-# Dictionary from qdapDictionaries package
-library(qdapDictionaries)
-words <- dplyr::as_tibble(DICTIONARY)
-words
-#> # A tibble: 20,137 × 2
-#>    word  syllables
-#>    <chr>     <dbl>
-#>  1 hm            1
-#>  2 hmm           1
-#>  3 hmmm          1
-#>  4 hmph          1
-#>  5 mmhmm         2
-#>  6 mmhm          2
-#>  7 mm            1
-#>  8 mmm           1
-#>  9 mmmm          1
-#> 10 pff           1
-#> # ℹ 20,127 more rows
-```
-
-Sample 1,000 misspellings and find their matches:
-
-``` r
-set.seed(2016)
-sub_misspellings <- misspellings %>%
-  sample_n(1000)
-
-# Fuzzy join with max distance of 1
-joined <- sub_misspellings %>%
-  fuzzystring_inner_join(
-    words, 
-    by = c(misspelling = "word"), 
-    max_dist = 1
-  )
-
-joined
-#>      misspelling    correct       word syllables
-#>           <char>     <char>     <char>     <num>
-#>   1:   cyclinder   cylinder   cylinder         3
-#>   2: beastiality bestiality bestiality         5
-#>   3:    affilate  affiliate  affiliate         4
-#>   4:     supress   suppress   suppress         2
-#>   5:    intevene  intervene  intervene         3
-#>  ---                                            
-#> 756:        fiel      field       file         1
-#> 757:        fiel      field       fill         1
-#> 758:        fiel      field       fuel         2
-#> 759:        fiel      field       riel         2
-#> 760:    aparment  apartment  apartment         3
-```
-
-### Analyzing match quality
-
-Check how many misspellings we successfully matched:
-
-``` r
-# Count unique misspellings matched
-joined %>%
-  count(misspelling, correct)
-#>      misspelling    correct     n
-#>           <char>     <char> <int>
-#>   1:      abilty    ability     1
-#>   2:   accademic   academic     1
-#>   3:    accademy    academy     1
-#>   4:   accension  accession     2
-#>   5:  acceptence acceptance     1
-#>  ---                             
-#> 458:        wnat       want     3
-#> 459:  wonderfull  wonderful     1
-#> 460:       wroet      wrote     1
-#> 461:     wupport    support     1
-#> 462:      zeebra      zebra     1
-
-# Calculate accuracy
-which_correct <- joined %>%
-  group_by(misspelling, correct) %>%
-  summarize(
-    guesses = n(), 
-    one_correct = any(correct == word),
-    .groups = "drop"
-  )
-
-# Percentage getting at least one correct guess
-mean(which_correct$one_correct)
-#> [1] 0.8246753
-
-# Number with exactly one correct match
-sum(which_correct$guesses == 1 & which_correct$one_correct)
-#> [1] 290
-```
-
-### Including distance metrics
-
-Add a distance column to see how far apart the matches are:
-
-``` r
-joined_dists <- sub_misspellings %>%
-  fuzzystring_inner_join(
-    words, 
-    by = c(misspelling = "word"), 
-    max_dist = 2,
-    distance_col = "distance"
-  )
-
-# Find the closest match for each misspelling
-closest <- joined_dists %>%
-  group_by(misspelling) %>%
-  top_n(1, desc(distance)) %>%
-  ungroup()
-
-# Distribution of distances
-closest %>%
-  count(distance)
-#> # A tibble: 3 × 2
-#>   distance     n
-#>      <dbl> <int>
-#> 1        0     3
-#> 2        1   739
-#> 3        2   594
-```
-
-### Using different join types
-
-**Left join** to keep unmatched words:
-
-``` r
-left_joined <- sub_misspellings %>%
-  fuzzystring_left_join(
-    words, 
-    by = c(misspelling = "word"), 
-    max_dist = 1
-  )
-
-# Show words we couldn't match
-left_joined %>%
-  filter(is.na(word))
-#>        misspelling       correct   word syllables
-#>             <char>        <char> <char>     <num>
-#>   1:     Sanhedrim     Sanhedrin   <NA>        NA
-#>   2: consicousness consciousness   <NA>        NA
-#>   3:    repubicans   republicans   <NA>        NA
-#>   4:      comitted     committed   <NA>        NA
-#>   5:     emmisions     emissions   <NA>        NA
-#>  ---                                             
-#> 534:   accquainted    acquainted   <NA>        NA
-#> 535:   ubiquitious    ubiquitous   <NA>        NA
-#> 536:       Januray       January   <NA>        NA
-#> 537:   aggaravates    aggravates   <NA>        NA
-#> 538:       wayword       wayward   <NA>        NA
-```
-
-**Anti join** to find only unmatched words:
-
-``` r
-unmatched <- sub_misspellings %>%
-  fuzzystring_anti_join(
-    words, 
-    by = c(misspelling = "word"), 
-    max_dist = 1
-  )
-
-unmatched
-#>        misspelling       correct
-#>             <char>        <char>
-#>   1:     Sanhedrim     Sanhedrin
-#>   2: consicousness consciousness
-#>   3:    repubicans   republicans
-#>   4:      comitted     committed
-#>   5:     emmisions     emissions
-#>  ---                            
-#> 534:   accquainted    acquainted
-#> 535:   ubiquitious    ubiquitous
-#> 536:       Januray       January
-#> 537:   aggaravates    aggravates
-#> 538:       wayword       wayward
+head(misspellings)
 ```
 
 ## Performance
 
-**fuzzystring** uses a C++ implementation for row binding combined with
-a `data.table` backend for fast performance on large datasets. The
-package is optimized for:
+`fuzzystring` keeps more of the join execution on a compiled path than the
+original `fuzzyjoin` implementation. In practice, the package combines:
 
-- Efficient string distance calculations with prefiltering for
-  Levenshtein-like metrics
-- Memory-efficient joins using data.table’s reference semantics
-- Type-safe column operations preserving factors, dates, and other
-  attributes
+- `data.table` grouping and candidate planning
+- adaptive blocking for single-column string joins
+- compiled row expansion, row binding, and final assembly
+- type-preserving handling of dates, datetimes, factors, and list-columns
 
-## Advanced usage
+The benchmark article summarizes a precomputed comparison against
+`fuzzyjoin::stringdist_join()` using the same methods and sample sizes:
 
-### Multiple column joins
+- Getting started: <https://paulesantos.github.io/fuzzystring/articles/getting_started.html>
+- Benchmark article: <https://paulesantos.github.io/fuzzystring/articles/benchmark_fuzzyjoin_comparison.html>
+
+## Multiple-column joins
+
+`fuzzystring_join()` can match across more than one string column by applying
+the same distance method and threshold to each mapped column.
 
 ``` r
-# Match on both string similarity and numeric proximity
-fuzzystring_inner_join(
-  x, y,
-  by = c(name = "approx_name", value = "approx_value"),
-  match_fun = list(
-    name = function(x, y) stringdist::stringdist(x, y) <= 1,
-    value = function(x, y) abs(x - y) < 0.5
-  )
+x_multi <- data.frame(
+  first = c("Jon", "Maira"),
+  last = c("Smyth", "Gonzales")
 )
-```
 
-### Custom distance functions
+y_multi <- data.frame(
+  first_ref = c("John", "Maria"),
+  last_ref = c("Smith", "Gonzalez"),
+  id = 1:2
+)
 
-``` r
-# Use custom matching logic
-fstring_inner_join(
-  x, y,
-  by = c(name = "approx_name"),
-  match_fun = function(x, y) {
-    # Your custom matching logic
-    result <- your_distance_function(x, y)
-    result <= threshold
-  }
+fuzzystring_inner_join(
+  x_multi, y_multi,
+  by = c(first = "first_ref", last = "last_ref"),
+  method = "osa",
+  max_dist = 1
 )
 ```
 
 ## Related packages
 
-- **[fuzzyjoin](https://github.com/dgrtwo/fuzzyjoin)**: Original fuzzy
-  join implementation (dplyr-based)
-- **[stringdist](https://github.com/markvanderloo/stringdist)**: String
-  distance metrics
-- **[data.table](https://rdatatable.gitlab.io/data.table/)**:
-  High-performance data manipulation
+- **[fuzzyjoin](https://github.com/dgrtwo/fuzzyjoin)**: original fuzzy join API
+  that inspired this package
+- **[stringdist](https://github.com/markvanderloo/stringdist)**: distance
+  metrics
+- **[data.table](https://rdatatable.gitlab.io/data.table/)**: high-performance
+  tabular backend
 
 ## Credits
 
-- **David Robinson**: Credited for the `fuzzyjoin` package, which served
-  as the base for `fuzzystring`; some core `fuzzyjoin` functions were
-  adapted and reinterpreted using `data.table`.
-
-**fuzzystring** builds on these great packages to provide a fast,
-data.table-native implementation with C++ optimization.
+`fuzzystring` builds on ideas popularized by `fuzzyjoin`, while reinterpreting
+the join pipeline around `data.table` and compiled C++ result assembly.

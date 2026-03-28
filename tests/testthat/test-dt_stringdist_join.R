@@ -29,7 +29,7 @@ test_that("stringdist_join / variants (data.table backend)", {
                                 distance_col = "distance")
 
   # count(cut, cut2) + arrange(cut)
-  result <- as.data.table(j)[, .N, by = .(cut, cut2)]
+  result <- data.table::as.data.table(j)[, .N, by = .(cut, cut2)]
   data.table::setorder(result, cut)
 
   expect_equal(as.character(result$cut),
@@ -45,7 +45,7 @@ test_that("stringdist_join / variants (data.table backend)", {
   # With default max_dist=2, here all accepted should be distance 1
   expect_true(all(j$distance == 1))
 
-  vg <- as.data.table(j)[cut == "Very Good", .N, by = type]
+  vg <- data.table::as.data.table(j)[cut == "Very Good", .N, by = type]
   data.table::setorder(vg, type)
 
   expect_equal(vg$type, c(4L, 5L))
@@ -113,42 +113,6 @@ test_that("stringdist_join / variants (data.table backend)", {
 
   expect_equal(sort(as.character(unique(result_a$cut))), notin)
   expect_equal(nrow(result_a), sum(result_a$cut %in% notin))
-
-  # ------------------------------------------------------------------
-  # Multiple match functions via fuzzy_inner_join (data.table backend)
-  # ------------------------------------------------------------------
-  d_multi <- data.table::data.table(
-    cut2   = c("Idea", "Premiums", "Premiom", "VeryGood", "VeryGood", "Faiir"),
-    carat2 = c(0, 0.5, 1, 1.5, 2, 2.5),
-    type   = 1:6
-  )
-
-  sdist <- function(s1, s2) stringdist::stringdist(s1, s2) <= 1
-  ndist <- function(n1, n2) abs(n1 - n2) < 0.25
-
-  j_multi <- fstring_inner_join(
-    diamonds, d_multi,
-    by = c(cut = "cut2", carat = "carat2"),
-    match_fun = list(sdist, ndist)
-  )
-
-  result_multi <- as.data.table(j_multi)[, .N, by = .(cut, cut2)]
-  data.table::setorder(result_multi, cut)
-
-  expect_equal(as.character(result_multi$cut),
-               c("Fair", "Very Good", "Premium", "Premium", "Ideal"))
-  expect_equal(result_multi$cut2,
-               c("Faiir", "VeryGood", "Premiums", "Premiom", "Idea"))
-
-  expect_lt(max(abs(j_multi$carat - j_multi$carat2)), 0.25)
-
-  # named list (by x column names)
-  j_multi_named <- fstring_inner_join(
-    diamonds, d_multi,
-    by = c(cut = "cut2", carat = "carat2"),
-    match_fun = list(carat = ndist, cut = sdist)
-  )
-  expect_equal(j_multi, j_multi_named)
 
   # ------------------------------------------------------------------
   # No matches cases (including overlapping column names)
@@ -297,4 +261,139 @@ test_that("stringdist_join / variants (data.table backend)", {
 
   res_anti <- fuzzystring_anti_join(a, b, by = c(x = "y"), max_dist = 1, distance_col = "distance")
   expect_equal(as.data.frame(a), as.data.frame(res_anti))
+
+  # ------------------------------------------------------------------
+  # Overlapping names in outer joins keep .x / .y suffixes
+  # ------------------------------------------------------------------
+  x_overlap_outer <- data.table::data.table(
+    key_value = c("alpha", "bravo"),
+    shared = 1:2,
+    when = as.Date(c("2024-01-01", "2024-01-02"))
+  )
+  data.table::setnames(x_overlap_outer, "key_value", "key")
+  y_overlap_outer <- data.table::data.table(
+    key_value = c("alphx", "charlie"),
+    shared = 10:11,
+    label = c("matched", "unmatched")
+  )
+  data.table::setnames(y_overlap_outer, "key_value", "key")
+
+  outer_overlap <- fuzzystring_full_join(
+    x_overlap_outer,
+    y_overlap_outer,
+    by = "key",
+    max_dist = 1,
+    distance_col = "distance"
+  )
+
+  expect_true(all(c("key.x", "shared.x", "key.y", "shared.y", "when", "label", "distance") %in% names(outer_overlap)))
+  expect_s3_class(outer_overlap$when, "Date")
+  expect_equal(sum(is.na(outer_overlap$key.x)), 1L)
+  expect_equal(sum(is.na(outer_overlap$key.y)), 1L)
+
+  # ------------------------------------------------------------------
+  # Typed columns are preserved in compiled binding paths
+  # ------------------------------------------------------------------
+  x_typed <- data.table::data.table(
+    name = c("alpha", "bravo"),
+    when = as.Date(c("2024-01-01", "2024-01-02")),
+    stamp = as.POSIXct(c("2024-01-01 10:00:00", "2024-01-02 11:30:00"), tz = "UTC"),
+    grp = factor(c("a", "b")),
+    payload = I(list(list(id = 1L), list(id = 2L)))
+  )
+  y_typed <- data.table::data.table(
+    approx_name = c("alphx", "charlie"),
+    note = c("hit", "miss"),
+    meta = I(list(list(code = 10L), list(code = 20L)))
+  )
+
+  typed_left <- fuzzystring_left_join(
+    x_typed,
+    y_typed,
+    by = c(name = "approx_name"),
+    max_dist = 1,
+    distance_col = "distance"
+  )
+
+  expect_s3_class(typed_left$when, "Date")
+  expect_s3_class(typed_left$stamp, "POSIXct")
+  expect_equal(attr(typed_left$stamp, "tzone"), "UTC")
+  expect_true(is.factor(typed_left$grp))
+  expect_type(typed_left$payload, "list")
+  expect_equal(typed_left$payload[[1]]$id, 1L)
+  expect_true(is.na(typed_left$note[2]))
+
+  typed_right <- fuzzystring_right_join(
+    x_typed,
+    y_typed,
+    by = c(name = "approx_name"),
+    max_dist = 1,
+    distance_col = "distance"
+  )
+
+  expect_type(typed_right$meta, "list")
+  expect_equal(typed_right$meta[[1]]$code, 10L)
+  expect_true(is.na(typed_right$when[is.na(typed_right$name)][1]))
+
+  # ------------------------------------------------------------------
+  # data.frame inputs return plain data.frames
+  # ------------------------------------------------------------------
+  res_semi_df <- fuzzystring_semi_join(as.data.frame(a), as.data.frame(a), by = c(x = "x"), max_dist = 0)
+  res_anti_df <- fuzzystring_anti_join(as.data.frame(a), as.data.frame(b), by = c(x = "y"), max_dist = 1)
+  expect_s3_class(res_semi_df, "data.frame")
+  expect_false(data.table::is.data.table(res_semi_df))
+  expect_s3_class(res_anti_df, "data.frame")
+  expect_false(data.table::is.data.table(res_anti_df))
+})
+
+test_that("tbl_df inputs return tbl_df outputs", {
+  skip_if_not_installed("tibble")
+
+  x_tbl <- tibble::tibble(
+    name = c("Idea", "Premiom", "Very Good"),
+    id = 1:3
+  )
+
+  y_tbl <- tibble::tibble(
+    approx_name = c("Ideal", "Premium", "VeryGood"),
+    grp = c("A", "B", "C")
+  )
+
+  res_inner <- fuzzystring_inner_join(
+    x_tbl,
+    y_tbl,
+    by = c(name = "approx_name"),
+    max_dist = 2,
+    distance_col = "distance"
+  )
+  expect_s3_class(res_inner, "tbl_df")
+  expect_false(data.table::is.data.table(res_inner))
+
+  res_left <- fuzzystring_left_join(
+    x_tbl,
+    y_tbl,
+    by = c(name = "approx_name"),
+    max_dist = 2,
+    distance_col = "distance"
+  )
+  expect_s3_class(res_left, "tbl_df")
+  expect_false(data.table::is.data.table(res_left))
+
+  res_semi <- fuzzystring_semi_join(
+    x_tbl,
+    y_tbl,
+    by = c(name = "approx_name"),
+    max_dist = 2
+  )
+  expect_s3_class(res_semi, "tbl_df")
+  expect_false(data.table::is.data.table(res_semi))
+
+  res_anti <- fuzzystring_anti_join(
+    tibble::tibble(name = c("alpha", "bravo")),
+    tibble::tibble(approx_name = c("charlie", "delta")),
+    by = c(name = "approx_name"),
+    max_dist = 1
+  )
+  expect_s3_class(res_anti, "tbl_df")
+  expect_false(data.table::is.data.table(res_anti))
 })

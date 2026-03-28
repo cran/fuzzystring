@@ -116,12 +116,21 @@ fuzzystring_join(
 # )
 
 ## ----multi-column, eval = FALSE-----------------------------------------------
+# x_multi <- data.frame(
+#   first = c("Jon", "Maira"),
+#   last = c("Smyth", "Gonzales")
+# )
+# 
+# y_multi <- data.frame(
+#   first_ref = c("John", "Maria"),
+#   last_ref = c("Smith", "Gonzalez"),
+#   customer_id = 1:2
+# )
+# 
 # fuzzystring_inner_join(
-#   x, y,
-#   by = c(name = "approx_name", value = "approx_value"),
-#   match_fun = list(
-#     name = function(x, y) stringdist::stringdist(x, y) <= 1,
-#     value = function(x, y) abs(x - y) < 0.5
-#   )
+#   x_multi, y_multi,
+#   by = c(first = "first_ref", last = "last_ref"),
+#   method = "osa",
+#   max_dist = 1
 # )
 
